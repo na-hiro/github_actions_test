@@ -6,7 +6,7 @@ name: Daily Stock Market Report
 #    - cron: "0 0 * * 1-5"
 on:
   schedule:
-    - cron: "5 9 * * 1-5"  # JST 18:05 に実行
+    - cron: "30 9 * * 1-5"  # JST 18:05 に実行
   workflow_dispatch: {}
 
 jobs:
