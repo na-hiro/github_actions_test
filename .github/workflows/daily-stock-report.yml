@@ -1,9 +1,14 @@
 name: Daily Stock Market Report
 
+#on:
+#  schedule:
+#    # UTCで指定。0:00 UTC = 9:00 JST
+#    - cron: "0 0 * * 1-5"
 on:
   schedule:
-    # UTCで指定。0:00 UTC = 9:00 JST
-    - cron: "0 0 * * 1-5"
+    - cron: "40 8 * * 1-5"
+  workflow_dispatch: {}
+
   # 手動実行できるようにしておくとデバッグに便利
   workflow_dispatch: {}
 
