@@ -1,74 +1,61 @@
 #!/usr/bin/env python3
 import os
 import datetime
-from openai import OpenAI
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
+from dotenv import load_dotenv
+from langchain_community.agent_toolkits import SlackToolkit
+from langchain_openai import ChatOpenAI
+from langchain.agents import AgentType, initialize_agent
+
+load_dotenv()
 
 # 必須環境変数チェック
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
-SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID")
+assert os.getenv("OPENAI_API_KEY"), "OPENAI_API_KEY が設定されていません"
+assert os.getenv("SLACK_USER_TOKEN"), "SLACK_USER_TOKEN が設定されていません"
 
-assert OPENAI_API_KEY, "OPENAI_API_KEY が設定されていません"
-assert SLACK_BOT_TOKEN, "SLACK_BOT_TOKEN が設定されていません"
-assert SLACK_CHANNEL_ID, "SLACK_CHANNEL_ID が設定されていません"
+# Slackツール読み込み
+toolkit = SlackToolkit()
+tools = toolkit.get_tools()
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
-slack_client = WebClient(token=SLACK_BOT_TOKEN)
+# LLM設定（あなたの環境で動いていたものと同じ）
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.5,
+)
 
+# エージェント初期化
+agent_executor = initialize_agent(
+    tools=tools,
+    llm=llm,
+    agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True,
+)
 
-def build_summary() -> str:
-    """GPTにサンプル市場サマリを書かせる（実データにはアクセスしない）"""
-    jst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
-    date_str = jst.strftime("%Y-%m-%d")
+# 今日の日付（JST）を入れてあげる
+jst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+date_str = jst.strftime("%Y-%m-%d")
 
-    prompt = f"""
-今日は {date_str} です。
+# エージェントへの指示
+prompt = f"""
+あなたは日本語で分かりやすく解説するマーケットアナリストです。
 
-実際の株価APIやニュースにはアクセスせず、
-一般的な傾向の例として「本日の世界株式市場サマリ（サンプル）」を日本語で作成してください。
+以下の条件で、「本日の株式市場サマリー（サンプル）」を作成し、
+その内容を Slack の「all-動作検証用」チャンネルに投稿してください。
 
 条件:
-- 日本、米国、欧州など主要市場にそれぞれ一言コメント
+- 日付: {date_str} （JSTベース）
+- 日本、米国、欧州など主要市場について、それぞれ1〜2行ずつコメントする
 - 箇条書き 3〜6行程度
-- あくまで例示的・仮想的な内容で、実データに基づくと誤解させない書き方
-- 必ず最後に次の一文を入れる：
+- 実際のリアルタイムデータにはアクセスしていない前提で、
+  一般的な傾向の例として自然な文章にする
+- 実際の指数値・騰落率は「例」として書いてもよいが、
+  本物のデータだと誤解させない書き方にする
+- 最後に必ず次の一文を含める：
   「※このサマリーは自動生成されたサンプルであり、実際の市場データに基づくものではありません。」
 
-出力は、そのままSlackに投稿できるテキストのみ。
+出力は、指定チャンネルへの投稿のみを行ってください。
 """
 
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "あなたは簡潔で分かりやすい日本語のマーケット解説者です。"},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.5,
-    )
+# 実行（エージェントがSlackツールを使って投稿することを期待）
+result = agent_executor.run(prompt)
 
-    return response.choices[0].message.content.strip()
-
-
-def post_to_slack(text: str):
-    """生成したテキストをSlackに投稿"""
-    try:
-        slack_client.chat_postMessage(
-            channel=SLACK_CHANNEL_ID,
-            text=text,
-        )
-        print("Slack への投稿に成功しました。")
-    except SlackApiError as e:
-        print(f"Slack への投稿に失敗しました: {e.response['error']}")
-        raise
-
-
-def main():
-    summary = build_summary()
-    print("Generated summary:\n", summary)
-    post_to_slack(summary)
-
-
-if __name__ == "__main__":
-    main()
+print("Agent result:", result)
