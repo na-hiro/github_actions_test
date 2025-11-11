@@ -1,11 +1,9 @@
 name: Slack Agent Test
 
 on:
-  # 手動実行
   workflow_dispatch: {}
-  # スケジュール実行（例: 平日 18:05 JST = 09:05 UTC）
   schedule:
-    - cron: "5 9 * * 1-5"
+    - cron: "5 9 * * 1-5"  # JST 18:05
 
 jobs:
   run-slack-agent:
@@ -31,7 +29,6 @@ jobs:
             "langchain-openai==0.0.8" \
             python-dotenv \
             slack_sdk
-
 
       - name: Run Slack agent
         run: |
