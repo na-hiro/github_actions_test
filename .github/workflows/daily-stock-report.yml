@@ -6,9 +6,8 @@ name: Daily Stock Market Report
 #    - cron: "0 0 * * 1-5"
 on:
   schedule:
-    - cron: "40 8 * * 1-5"
-  # 手動実行できるようにしておくとデバッグに便利
-  workflow_dispatch: {}
+    - cron: "35 8 * * 1-5"  # JST 17:35 の例（そのままでOK）
+  workflow_dispatch: {}      # ← これを追加すると手動実行できる
 
 jobs:
   report:
