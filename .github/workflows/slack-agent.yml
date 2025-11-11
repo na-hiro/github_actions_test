@@ -1,4 +1,4 @@
-name: Slack Agent Test
+name: Slack Market Summary
 
 on:
   workflow_dispatch: {}
@@ -10,7 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
 
     steps:
       - name: Checkout repository
@@ -23,12 +24,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install \
-            "langchain==0.1.20" \
-            "langchain-community==0.0.38" \
-            "langchain-openai==0.0.8" \
-            python-dotenv \
-            slack_sdk
+          pip install openai slack_sdk
 
       - name: Run Slack agent
         run: |

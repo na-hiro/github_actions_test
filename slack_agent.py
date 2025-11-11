@@ -1,70 +1,74 @@
 #!/usr/bin/env python3
 import os
 import datetime
-
-from dotenv import load_dotenv
-from langchain_community.agent_toolkits import SlackToolkit
-from langchain_openai import ChatOpenAI
-from langchain.agents import AgentType, initialize_agent
-
-load_dotenv()
+from openai import OpenAI
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 # 必須環境変数チェック
-assert os.getenv("OPENAI_API_KEY"), "OPENAI_API_KEY が設定されていません"
-assert os.getenv("SLACK_USER_TOKEN"), "SLACK_USER_TOKEN が設定されていません"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
+SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID")
 
-def build_prompt() -> str:
-    """実データなしで、市場サマリー風テキストを生成させるためのプロンプト"""
+assert OPENAI_API_KEY, "OPENAI_API_KEY が設定されていません"
+assert SLACK_BOT_TOKEN, "SLACK_BOT_TOKEN が設定されていません"
+assert SLACK_CHANNEL_ID, "SLACK_CHANNEL_ID が設定されていません"
+
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+slack_client = WebClient(token=SLACK_BOT_TOKEN)
+
+
+def build_summary() -> str:
+    """GPTにサンプル市場サマリを書かせる（実データにはアクセスしない）"""
     jst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
     date_str = jst.strftime("%Y-%m-%d")
 
-    return f"""
+    prompt = f"""
 今日は {date_str} です。
 
-実際の株価データやニュースにはアクセスせずに、
-一般的によくある値動きパターンをベースにした
-「サンプル的な株式市場サマリー」を日本語で作成してください。
+実際の株価APIやニュースにはアクセスせず、
+一般的な傾向の例として「本日の世界株式市場サマリ（サンプル）」を日本語で作成してください。
 
 条件:
-- 世界の主要市場（日本、米国、欧州など）について触れる
-- 3〜6行程度の箇条書き
-- 「〜といった動きが見られました」など、例示的・仮想的な表現にする
-- 具体的な指数値・騰落率は、あくまで例として自然な数字を使ってよいが、
-  「実際のデータに基づくものではありません」と分かる書き方にする
-- 最後に必ず次の一文を入れる：
+- 日本、米国、欧州など主要市場にそれぞれ一言コメント
+- 箇条書き 3〜6行程度
+- あくまで例示的・仮想的な内容で、実データに基づくと誤解させない書き方
+- 必ず最後に次の一文を入れる：
   「※このサマリーは自動生成されたサンプルであり、実際の市場データに基づくものではありません。」
 
-出力は、そのままSlackに投稿できる文章だけを返してください。
+出力は、そのままSlackに投稿できるテキストのみ。
 """
+
+    response = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "あなたは簡潔で分かりやすい日本語のマーケット解説者です。"},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.5,
+    )
+
+    return response.choices[0].message.content.strip()
+
+
+def post_to_slack(text: str):
+    """生成したテキストをSlackに投稿"""
+    try:
+        slack_client.chat_postMessage(
+            channel=SLACK_CHANNEL_ID,
+            text=text,
+        )
+        print("Slack への投稿に成功しました。")
+    except SlackApiError as e:
+        print(f"Slack への投稿に失敗しました: {e.response['error']}")
+        raise
+
 
 def main():
-    # Slack ツールと LLM 初期化
-    toolkit = SlackToolkit()
-    tools = toolkit.get_tools()
+    summary = build_summary()
+    print("Generated summary:\n", summary)
+    post_to_slack(summary)
 
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.4,
-    )
-
-    agent_executor = initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
-        verbose=True,
-    )
-
-    prompt = build_prompt()
-
-    # SlackToolkit に「指定チャンネルへこのサマリを投稿させる」指示
-    command = f"""
-「all-動作検証用」チャンネルに、以下のテキストを投稿してください：
-
-{prompt}
-"""
-
-    result = agent_executor.run(command)
-    print("Agent result:", result)
 
 if __name__ == "__main__":
     main()
