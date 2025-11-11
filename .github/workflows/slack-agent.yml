@@ -11,6 +11,7 @@ jobs:
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
 
     steps:
       - name: Checkout repository
@@ -23,7 +24,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install openai slack_sdk
+          pip install openai slack_sdk requests
 
       - name: Run Slack agent
         run: |
