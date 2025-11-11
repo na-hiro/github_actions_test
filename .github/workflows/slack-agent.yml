@@ -1,9 +1,12 @@
-name: Slack Agent Test
+name: Japan Market Summary (07:30 JST)
 
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "5 9 * * 1-5"  # JST 18:05
+    # 毎日 日本時間 07:30 に実行
+    # GitHub Actions の cron は UTC 指定なので、
+    # 07:30 JST(UTC+9) → 前日 22:30 UTC
+    - cron: "30 22 * * *"
 
 jobs:
   run-slack-agent:
@@ -11,7 +14,6 @@ jobs:
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
-      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
 
     steps:
       - name: Checkout repository
@@ -24,7 +26,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install openai slack_sdk requests
+          pip install openai slack_sdk python-dotenv requests
 
       - name: Run Slack agent
         run: |
