@@ -1,0 +1,25 @@
+name: Daily Stock Market Report
+
+on:
+  schedule:
+    # UTCで指定。0:00 UTC = 9:00 JST
+    - cron: "0 0 * * 1-5"
+  # 手動実行できるようにしておくとデバッグに便利
+  workflow_dispatch: {}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run daily stock report script
+        run: |
+          python scripts/daily_stock_report.py
