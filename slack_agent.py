@@ -17,6 +17,7 @@ if env_path.exists():
 # ==== 環境変数 ====
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SLACK_USER_TOKEN = os.getenv("SLACK_USER_TOKEN")
+PAGES_URL = os.getenv("PAGES_URL", "https://na-hiro.github.io/github_actions_test/")  # ← 追加
 
 assert OPENAI_API_KEY, "OPENAI_API_KEY が設定されていません"
 assert SLACK_USER_TOKEN, "SLACK_USER_TOKEN が設定されていません"
@@ -219,12 +220,13 @@ def main():
     print("=== Generated summary ===")
     print(summary)
 
-    # 指標データ＋サマリーをまとめて投稿
-    message = snapshot + "\n\n" + summary
+    # 指標データ＋サマリー＋GitHub Pagesのリンクをまとめて投稿
+    message = (
+        f"【インタラクティブチャート（GitHub Pages）】\n{PAGES_URL}\n\n"
+        + snapshot + "\n\n" + summary
+    )
 
     post_to_slack(message)
-
-
 
 if __name__ == "__main__":
     main()

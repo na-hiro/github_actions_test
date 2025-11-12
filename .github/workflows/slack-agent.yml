@@ -1,19 +1,20 @@
 name: Japan Market Summary (07:30 JST)
 
 on:
+  # 手動実行
   workflow_dispatch: {}
+  # 毎日 日本時間 07:30（＝UTC 前日 22:30）
   schedule:
-    # 毎日 日本時間 07:30 に実行
-    # GitHub Actions の cron は UTC 指定なので、
-    # 07:30 JST(UTC+9) → 前日 22:30 UTC
     - cron: "30 22 * * *"
 
+permissions:
+  contents: write   # gh-pages へ push するために必要
+  pages: write
+  id-token: write
+
 jobs:
-  run-slack-agent:
+  build-and-deploy-chart:
     runs-on: ubuntu-latest
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
 
     steps:
       - name: Checkout repository
@@ -24,10 +25,81 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps for chart
+        run: |
+          pip install plotly requests pandas
+
+      - name: Generate interactive chart HTML (Stooq -> Plotly)
+        run: |
+          mkdir -p public
+          python - << 'EOF'
+          import requests, csv
+          import pandas as pd
+          import plotly.express as px
+
+          def fetch_stooq(symbol: str):
+              url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
+              r = requests.get(url, timeout=15)
+              r.raise_for_status()
+              lines = r.text.strip().splitlines()
+              reader = csv.DictReader(lines)
+              rows = list(reader)
+              if not rows:
+                  raise SystemExit(f"No data for {symbol}")
+              rows.sort(key=lambda x: x["Date"])
+              dates = [row["Date"] for row in rows if row.get("Close")]
+              closes = [float(row["Close"]) for row in rows if row.get("Close")]
+              return dates, closes
+
+          # Nikkei225 と TOPIX の120営業日で作図
+          nkx_dates, nkx_closes = fetch_stooq("^NKX")
+          tpx_dates, tpx_closes = fetch_stooq("^TPX")
+          nkx_dates, nkx_closes = nkx_dates[-120:], nkx_closes[-120:]
+          tpx_dates, tpx_closes = tpx_dates[-120:], tpx_closes[-120:]
+
+          df1 = pd.DataFrame({"Date": nkx_dates, "Nikkei 225": nkx_closes})
+          df2 = pd.DataFrame({"Date": tpx_dates, "TOPIX": tpx_closes})
+          df = pd.merge(df1, df2, on="Date", how="inner")
+
+          fig = px.line(
+              df, x="Date", y=["Nikkei 225", "TOPIX"],
+              title="日本株主要指数（Nikkei 225 / TOPIX）推移 - Stooqベース"
+          )
+          fig.update_xaxes(title_text="Date")
+          fig.update_yaxes(title_text="Index Level")
+
+          fig.write_html("public/index.html", include_plotlyjs="cdn", full_html=True)
+          EOF
+
+      - name: Deploy to GitHub Pages (gh-pages)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          publish_branch: gh-pages
+
+  run-slack-agent:
+    needs: build-and-deploy-chart
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+      # Slack本文に貼るGitHub PagesのURL（必要ならここを編集）
+      PAGES_URL: https://na-hiro.github.io/github_actions_test/
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies for Slack agent
         run: |
           pip install openai slack_sdk python-dotenv requests
 
-      - name: Run Slack agent
+      - name: Run Slack agent (post snapshot + summary + Pages URL)
         run: |
           python slack_agent.py
