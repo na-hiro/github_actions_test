@@ -29,46 +29,97 @@ jobs:
         run: |
           pip install plotly requests pandas
 
-      - name: Generate interactive chart HTML (Stooq -> Plotly)
+      - name: Generate interactive chart HTML from tickers.csv (type=index)
         run: |
           mkdir -p public
           python - << 'EOF'
-          import requests, csv
+          import csv
+          import requests
           import pandas as pd
           import plotly.express as px
+          from pathlib import Path
 
-          def fetch_stooq(symbol: str):
+          # ---- 1. tickers.csv から index のみ読む ----
+          cfg_path = Path("tickers.csv")
+          index_symbols = []  # [(symbol, label), ...]
+          if cfg_path.exists():
+              with cfg_path.open(encoding="utf-8") as f:
+                  reader = csv.DictReader(f)
+                  for row in reader:
+                      t = (row.get("type") or "").strip().lower()
+                      sym = (row.get("symbol") or "").strip()
+                      label = (row.get("label") or "").strip()
+                      if t == "index" and sym and label:
+                          index_symbols.append((sym, label))
+
+          # フォールバック（万一 index 行がなかった場合）
+          if not index_symbols:
+              index_symbols = [
+                  ("^NKX", "日経平均"),
+                  ("^TPX", "TOPIX"),
+              ]
+
+          # ---- 2. Stooq から各 index の日足データ取得 ----
+          def fetch_stooq_history(symbol: str):
               url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
               r = requests.get(url, timeout=15)
               r.raise_for_status()
               lines = r.text.strip().splitlines()
+              if len(lines) <= 1:
+                  raise SystemExit(f"No data for {symbol}")
               reader = csv.DictReader(lines)
               rows = list(reader)
               if not rows:
-                  raise SystemExit(f"No data for {symbol}")
+                  raise SystemExit(f"No data rows for {symbol}")
               rows.sort(key=lambda x: x["Date"])
               dates = [row["Date"] for row in rows if row.get("Close")]
               closes = [float(row["Close"]) for row in rows if row.get("Close")]
               return dates, closes
 
-          # Nikkei225 と TOPIX の120営業日で作図
-          nkx_dates, nkx_closes = fetch_stooq("^NKX")
-          tpx_dates, tpx_closes = fetch_stooq("^TPX")
-          nkx_dates, nkx_closes = nkx_dates[-120:], nkx_closes[-120:]
-          tpx_dates, tpx_closes = tpx_dates[-120:], tpx_closes[-120:]
+          # ---- 3. 全 index を Date でマージして1つの DataFrame に ----
+          master_df = None
 
-          df1 = pd.DataFrame({"Date": nkx_dates, "Nikkei 225": nkx_closes})
-          df2 = pd.DataFrame({"Date": tpx_dates, "TOPIX": tpx_closes})
-          df = pd.merge(df1, df2, on="Date", how="inner")
+          for sym, label in index_symbols:
+              try:
+                  dates, closes = fetch_stooq_history(sym)
+              except Exception as e:
+                  print(f"[WARN] {sym}({label}) の取得に失敗: {e}")
+                  continue
+
+              # 最近120営業日分だけ使う
+              dates = dates[-120:]
+              closes = closes[-120:]
+
+              df = pd.DataFrame({
+                  "Date": dates,
+                  label: closes,
+              })
+
+              if master_df is None:
+                  master_df = df
+              else:
+                  master_df = pd.merge(master_df, df, on="Date", how="inner")
+
+          if master_df is None or master_df.empty:
+              raise SystemExit("指数データが取得できませんでした（tickers.csv を確認してください）")
+
+          # ---- 4. Plotly でインタラクティブチャート生成 ----
+          y_cols = [c for c in master_df.columns if c != "Date"]
 
           fig = px.line(
-              df, x="Date", y=["Nikkei 225", "TOPIX"],
-              title="日本株主要指数（Nikkei 225 / TOPIX）推移 - Stooqベース"
+              master_df,
+              x="Date",
+              y=y_cols,
+              title="日本株 主要指数 推移（tickers.csvのtype=indexに基づく / Stooqベース）",
           )
           fig.update_xaxes(title_text="Date")
           fig.update_yaxes(title_text="Index Level")
 
-          fig.write_html("public/index.html", include_plotlyjs="cdn", full_html=True)
+          fig.write_html(
+              "public/index.html",
+              include_plotlyjs="cdn",
+              full_html=True
+          )
           EOF
 
       - name: Deploy to GitHub Pages (gh-pages)
@@ -84,7 +135,7 @@ jobs:
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
-      # Slack本文に貼るGitHub PagesのURL（必要ならここを編集）
+      # Slack本文に貼るGitHub PagesのURL
       PAGES_URL: https://na-hiro.github.io/github_actions_test/
 
     steps:

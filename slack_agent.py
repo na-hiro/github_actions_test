@@ -17,7 +17,7 @@ if env_path.exists():
 # ==== 環境変数 ====
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SLACK_USER_TOKEN = os.getenv("SLACK_USER_TOKEN")
-PAGES_URL = os.getenv("PAGES_URL", "https://na-hiro.github.io/github_actions_test/")  # ← 追加
+PAGES_URL = os.getenv("PAGES_URL", "https://na-hiro.github.io/github_actions_test/")
 
 assert OPENAI_API_KEY, "OPENAI_API_KEY が設定されていません"
 assert SLACK_USER_TOKEN, "SLACK_USER_TOKEN が設定されていません"
@@ -25,32 +25,62 @@ assert SLACK_USER_TOKEN, "SLACK_USER_TOKEN が設定されていません"
 # Slack 投稿先
 SLACK_CHANNEL = "all-動作検証用"  # 必要なら "#..." や チャンネルID に変更
 
-# 対象（Stooqのシンボル）
-INDEX_SYMBOLS = {
-    "^NKX": "日経平均",  # Nikkei 225
-    "^TPX": "TOPIX",
-}
 
-STOCK_SYMBOLS = {
-    "7203.JP": "トヨタ自動車",
-    "6758.JP": "ソニーグループ",
-    "9984.JP": "ソフトバンクG",
-    "7974.JP": "任天堂",
-    "8035.JP": "東京エレクトロン",
-    "8306.JP": "三菱UFJFG",
-    "8316.JP": "三井住友FG",
-    "6861.JP": "キーエンス",
-}
+def load_symbols():
+    """
+    tickers.csv から index / stock を読み込む。
+    なければ従来のデフォルトにフォールバック。
+    """
+    cfg = Path(__file__).with_name("tickers.csv")
+    index_symbols = {}
+    stock_symbols = {}
+
+    if not cfg.exists():
+        # フォールバック（今までの固定定義）
+        index_symbols = {
+            "^NKX": "日経平均",
+            "^TPX": "TOPIX",
+        }
+        stock_symbols = {
+            "7203.JP": "トヨタ自動車",
+            "6758.JP": "ソニーグループ",
+            "9984.JP": "ソフトバンクG",
+            "7974.JP": "任天堂",
+            "8035.JP": "東京エレクトロン",
+            "8306.JP": "三菱UFJFG",
+            "8316.JP": "三井住友FG",
+            "6861.JP": "キーエンス",
+        }
+        return index_symbols, stock_symbols
+
+    with cfg.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            t = (row.get("type") or "").strip().lower()
+            sym = (row.get("symbol") or "").strip()
+            label = (row.get("label") or "").strip()
+            if not t or not sym or not label:
+                continue
+            if t == "index":
+                index_symbols[sym] = label
+            elif t == "stock":
+                stock_symbols[sym] = label
+
+    # 万が一 index が空ならデフォルトだけ足す
+    if not index_symbols:
+        index_symbols["^NKX"] = "日経平均"
+        index_symbols["^TPX"] = "TOPIX"
+
+    return index_symbols, stock_symbols
+
+
+INDEX_SYMBOLS, STOCK_SYMBOLS = load_symbols()
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 slack_client = WebClient(token=SLACK_USER_TOKEN)
 
 
 def fetch_from_stooq(symbol: str):
-    """
-    Stooq CSV (日足) から直近2営業日の終値を取得し、前日比・騰落率を返す。
-    URL形式: https://stooq.com/q/d/l/?s=<symbol>&i=d
-    """
     url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
     try:
         resp = requests.get(url, timeout=10)
@@ -59,7 +89,6 @@ def fetch_from_stooq(symbol: str):
         print(f"[ERROR] {symbol}: HTTPエラー: {e}")
         return None
 
-    # CSVをパース
     lines = resp.text.strip().splitlines()
     if len(lines) <= 1:
         print(f"[WARN] {symbol}: 行数不足: {len(lines)}")
@@ -67,12 +96,10 @@ def fetch_from_stooq(symbol: str):
 
     reader = csv.DictReader(lines)
     rows = [row for row in reader if row.get("Close") not in ("", "0", "0.00", None)]
-
     if len(rows) < 2:
         print(f"[WARN] {symbol}: 有効なデータ行が足りません")
         return None
 
-    # 直近2営業日（CSVは過去→現在の順 or 逆の場合もあるので、日付でソート）
     rows.sort(key=lambda r: r["Date"])
     latest = rows[-1]
     prev = rows[-2]
@@ -141,18 +168,18 @@ def build_stock_rankings() -> str:
         return f"{e['name']} ({sign}{e['change_pct']:.2f}%)"
 
     lines = []
-    lines.append("■ 値上がり率 上位（代表大型株）")
+    lines.append("■ 値上がり率 上位（指定銘柄）")
     for e in gainers:
         lines.append(f"- {fmt(e)}")
 
-    lines.append("■ 値下がり率 上位（代表大型株）")
+    lines.append("■ 値下がり率 上位（指定銘柄）")
     for e in losers:
         lines.append(f"- {fmt(e)}")
 
     up = sum(1 for r in results if r["change_pct"] > 0)
     down = sum(1 for r in results if r["change_pct"] < 0)
     flat = len(results) - up - down
-    lines.append(f"■ 地合い（代表大型株ベース）: 上昇 {up}, 下落 {down}, 横ばい {flat}")
+    lines.append(f"■ 地合い（指定銘柄ベース）: 上昇 {up}, 下落 {down}, 横ばい {flat}")
 
     return "\n".join(lines)
 
@@ -167,7 +194,7 @@ def build_market_snapshot_text() -> str:
 
 def build_summary(market_snapshot: str) -> str:
     prompt = f"""
-以下は、日本株市場（主要指数＋代表的な大型株）のスナップショットです：
+以下は、日本株市場（主要指数＋指定銘柄）のスナップショットです：
 
 {market_snapshot}
 
@@ -176,9 +203,9 @@ def build_summary(market_snapshot: str) -> str:
 要件:
 - 先頭に「【日本株マーケットサマリー】」と入れる
 - 箇条書き 3〜7行程度
-- 日経平均 / TOPIX の方向感
-- 値上がり / 値下がり上位の代表銘柄から読み取れるテーマ
-- 地合い（全面高・全面安・まちまち 等）を一言で
+- 指数の方向感
+- 指定銘柄の値上がり/値下がりから読み取れるテーマ
+- 地合い（全面高・全面安・まちまち等）を一言で
 - データ取得失敗があれば、それも正直に触れる
 - 初心者にも分かりやすい日本語
 - 最後に必ず次の一文を含める：
@@ -211,6 +238,7 @@ def post_to_slack(text: str):
         print("Slack 投稿エラー:", e.response.get("error"))
         raise
 
+
 def main():
     snapshot = build_market_snapshot_text()
     print("=== Market snapshot (raw) ===")
@@ -220,13 +248,13 @@ def main():
     print("=== Generated summary ===")
     print(summary)
 
-    # 指標データ＋サマリー＋GitHub Pagesのリンクをまとめて投稿
     message = (
         f"【インタラクティブチャート（GitHub Pages）】\n{PAGES_URL}\n\n"
         + snapshot + "\n\n" + summary
     )
 
     post_to_slack(message)
+
 
 if __name__ == "__main__":
     main()

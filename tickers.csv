@@ -1,0 +1,11 @@
+type,symbol,label
+index,^NKX,日経平均
+index,^TPX,TOPIX
+stock,7203.JP,トヨタ自動車
+stock,6758.JP,ソニーグループ
+stock,9984.JP,ソフトバンクG
+stock,7974.JP,任天堂
+stock,8035.JP,東京エレクトロン
+stock,8306.JP,三菱UFJFG
+stock,8316.JP,三井住友FG
+stock,6861.JP,キーエンス
