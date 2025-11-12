@@ -2,8 +2,8 @@ name: Japan Market Summary (07:30 JST)
 
 on:
   workflow_dispatch: {}
+  # 日本時間 07:30（UTC+9）= 前日 22:30 (UTC)
   schedule:
-    # 日本時間 07:30（UTC+9）= 前日 22:30 UTC
     - cron: "30 22 * * *"
 
 permissions:
@@ -51,7 +51,7 @@ jobs:
                       if t and sym and label:
                           tickers.append({"type": t, "symbol": sym, "label": label})
 
-          # フォールバック（tickers.csvなし/空）
+          # fallback: tickers.csv が無い/空のとき
           if not tickers:
               tickers = [
                   {"type": "index", "symbol": "^NKX", "label": "日経平均"},
@@ -84,11 +84,14 @@ jobs:
               try:
                   dates, closes = fetch_stooq_history(sym)
               except Exception as e:
-                  print(f"[WARN] overview {sym}({label}) 取得失敗: {e}")
+                  print(f"[WARN] overview {sym}({label}) fetch failed: {e}")
                   continue
 
               dates = dates[-120:]
               closes = closes[-120:]
+              if not dates:
+                  continue
+
               df = pd.DataFrame({"Date": dates, label: closes})
 
               if master_df is None:
@@ -102,4 +105,87 @@ jobs:
                   master_df,
                   x="Date",
                   y=y_cols,
-                  title="主要指数・金
+                  title="主要指数・金価格 推移（tickers.csvのtype=index,gold / Stooqベース）"
+              )
+              fig.update_xaxes(title_text="Date")
+              fig.update_yaxes(title_text="Level / Price")
+              fig.write_html("public/index.html", include_plotlyjs="cdn", full_html=True)
+          else:
+              with open("public/index.html", "w", encoding="utf-8") as f:
+                  f.write("<h1>データ取得に失敗しました。tickers.csv と Stooq を確認してください。</h1>")
+
+          # ===== 2) 全銘柄の個別チャート =====
+          links = []
+          for t in tickers:
+              sym = t["symbol"]
+              label = t["label"]
+              try:
+                  dates, closes = fetch_stooq_history(sym)
+              except Exception as e:
+                  print(f"[WARN] individual {sym}({label}) fetch failed: {e}")
+                  continue
+
+              dates = dates[-120:]
+              closes = closes[-120:]
+              if not dates:
+                  continue
+
+              df = pd.DataFrame({"Date": dates, label: closes})
+
+              fig = px.line(
+                  df,
+                  x="Date",
+                  y=label,
+                  title=f"{label} 推移（Stooq: {sym}）"
+              )
+              fig.update_xaxes(title_text="Date")
+              fig.update_yaxes(title_text="Price / Index")
+
+              safe_name = sym.replace("^", "").replace(".", "_")
+              out_path = f"public/{safe_name}.html"
+              fig.write_html(out_path, include_plotlyjs="cdn", full_html=True)
+              links.append((label, safe_name + ".html"))
+
+          # ===== 3) 一覧ページ (list.html) =====
+          if links:
+              links_html = "<ul>" + "".join(
+                  f'<li><a href="{href}">{label}</a></li>' for label, href in links
+              ) + "</ul>"
+          else:
+              links_html = "<p>個別チャートを生成できませんでした。</p>"
+
+          with open("public/list.html", "w", encoding="utf-8") as f:
+              f.write("<h1>個別チャート一覧</h1>" + links_html)
+          EOF
+
+      - name: Deploy to GitHub Pages (gh-pages)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          publish_branch: gh-pages
+
+  run-slack-agent:
+    needs: build-and-deploy-chart
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+      PAGES_URL: https://na-hiro.github.io/github_actions_test/
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies for Slack agent
+        run: |
+          pip install openai slack_sdk python-dotenv requests
+
+      - name: Run Slack agent
+        run: |
+          python slack_agent.py
