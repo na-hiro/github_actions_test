@@ -20,7 +20,7 @@ if env_path.exists():
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SLACK_USER_TOKEN = os.getenv("SLACK_USER_TOKEN")
-PAGES_URL = os.getenv("PAGES_URL", "https://na-hiro.github.io/github_actions_test/")
+PAGES_URL = os.getenv("PAGES_URL", "https://na-hiro.github.io/github_actions_test/list.html")
 
 assert OPENAI_API_KEY, "OPENAI_API_KEY が設定されていません"
 assert SLACK_USER_TOKEN, "SLACK_USER_TOKEN が設定されていません"
