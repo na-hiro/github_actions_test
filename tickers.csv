@@ -1,6 +1,7 @@
 type,symbol,label
 index,^NKX,日経平均
 index,^TPX,TOPIX
+gold,XAUUSD,金スポット価格(ドル建て)
 stock,7203.JP,トヨタ自動車
 stock,6758.JP,ソニーグループ
 stock,9984.JP,ソフトバンクG

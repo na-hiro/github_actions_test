@@ -1,14 +1,13 @@
 name: Japan Market Summary (07:30 JST)
 
 on:
-  # 手動実行
   workflow_dispatch: {}
-  # 毎日 日本時間 07:30（＝UTC 前日 22:30）
   schedule:
+    # 日本時間 07:30（UTC+9）= 前日 22:30 UTC
     - cron: "30 22 * * *"
 
 permissions:
-  contents: write   # gh-pages へ push するために必要
+  contents: write
   pages: write
   id-token: write
 
@@ -29,7 +28,7 @@ jobs:
         run: |
           pip install plotly requests pandas
 
-      - name: Generate interactive chart HTML from tickers.csv (type=index)
+      - name: Generate charts from tickers.csv
         run: |
           mkdir -p public
           python - << 'EOF'
@@ -39,27 +38,26 @@ jobs:
           import plotly.express as px
           from pathlib import Path
 
-          # ---- 1. tickers.csv から index のみ読む ----
-          cfg_path = Path("tickers.csv")
-          index_symbols = []  # [(symbol, label), ...]
-          if cfg_path.exists():
-              with cfg_path.open(encoding="utf-8") as f:
+          CFG = Path("tickers.csv")
+
+          tickers = []
+          if CFG.exists():
+              with CFG.open(encoding="utf-8") as f:
                   reader = csv.DictReader(f)
                   for row in reader:
                       t = (row.get("type") or "").strip().lower()
                       sym = (row.get("symbol") or "").strip()
                       label = (row.get("label") or "").strip()
-                      if t == "index" and sym and label:
-                          index_symbols.append((sym, label))
+                      if t and sym and label:
+                          tickers.append({"type": t, "symbol": sym, "label": label})
 
-          # フォールバック（万一 index 行がなかった場合）
-          if not index_symbols:
-              index_symbols = [
-                  ("^NKX", "日経平均"),
-                  ("^TPX", "TOPIX"),
+          # フォールバック（tickers.csvなし/空）
+          if not tickers:
+              tickers = [
+                  {"type": "index", "symbol": "^NKX", "label": "日経平均"},
+                  {"type": "index", "symbol": "^TPX", "label": "TOPIX"},
               ]
 
-          # ---- 2. Stooq から各 index の日足データ取得 ----
           def fetch_stooq_history(symbol: str):
               url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
               r = requests.get(url, timeout=15)
@@ -68,89 +66,40 @@ jobs:
               if len(lines) <= 1:
                   raise SystemExit(f"No data for {symbol}")
               reader = csv.DictReader(lines)
-              rows = list(reader)
+              rows = [row for row in reader if row.get("Close")]
               if not rows:
-                  raise SystemExit(f"No data rows for {symbol}")
+                  raise SystemExit(f"No close data for {symbol}")
               rows.sort(key=lambda x: x["Date"])
-              dates = [row["Date"] for row in rows if row.get("Close")]
-              closes = [float(row["Close"]) for row in rows if row.get("Close")]
+              dates = [row["Date"] for row in rows]
+              closes = [float(row["Close"]) for row in rows]
               return dates, closes
 
-          # ---- 3. 全 index を Date でマージして1つの DataFrame に ----
+          # ===== 1) index + gold の総合チャート (index.html) =====
+          overview_targets = [t for t in tickers if t["type"] in ("index", "gold")]
           master_df = None
 
-          for sym, label in index_symbols:
+          for t in overview_targets:
+              sym = t["symbol"]
+              label = t["label"]
               try:
                   dates, closes = fetch_stooq_history(sym)
               except Exception as e:
-                  print(f"[WARN] {sym}({label}) の取得に失敗: {e}")
+                  print(f"[WARN] overview {sym}({label}) 取得失敗: {e}")
                   continue
 
-              # 最近120営業日分だけ使う
               dates = dates[-120:]
               closes = closes[-120:]
-
-              df = pd.DataFrame({
-                  "Date": dates,
-                  label: closes,
-              })
+              df = pd.DataFrame({"Date": dates, label: closes})
 
               if master_df is None:
                   master_df = df
               else:
                   master_df = pd.merge(master_df, df, on="Date", how="inner")
 
-          if master_df is None or master_df.empty:
-              raise SystemExit("指数データが取得できませんでした（tickers.csv を確認してください）")
-
-          # ---- 4. Plotly でインタラクティブチャート生成 ----
-          y_cols = [c for c in master_df.columns if c != "Date"]
-
-          fig = px.line(
-              master_df,
-              x="Date",
-              y=y_cols,
-              title="日本株 主要指数 推移（tickers.csvのtype=indexに基づく / Stooqベース）",
-          )
-          fig.update_xaxes(title_text="Date")
-          fig.update_yaxes(title_text="Index Level")
-
-          fig.write_html(
-              "public/index.html",
-              include_plotlyjs="cdn",
-              full_html=True
-          )
-          EOF
-
-      - name: Deploy to GitHub Pages (gh-pages)
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./public
-          publish_branch: gh-pages
-
-  run-slack-agent:
-    needs: build-and-deploy-chart
-    runs-on: ubuntu-latest
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
-      # Slack本文に貼るGitHub PagesのURL
-      PAGES_URL: https://na-hiro.github.io/github_actions_test/
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies for Slack agent
-        run: |
-          pip install openai slack_sdk python-dotenv requests
-
-      - name: Run Slack agent (post snapshot + summary + Pages URL)
-        run: |
-          python slack_agent.py
+          if master_df is not None and not master_df.empty:
+              y_cols = [c for c in master_df.columns if c != "Date"]
+              fig = px.line(
+                  master_df,
+                  x="Date",
+                  y=y_cols,
+                  title="主要指数・金
