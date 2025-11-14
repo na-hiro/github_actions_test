@@ -170,7 +170,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+      #SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # ← こちらに変更
       PAGES_URL: https://na-hiro.github.io/github_actions_test/list.html
 
     steps:
