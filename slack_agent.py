@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+import json  # ← 追加
 
 
 # ==============================
@@ -175,6 +176,29 @@ def build_market_snapshot_text() -> str:
     return "\n\n".join(parts)
 
 # ==============================
+# 日次レポート JSON 保存
+# ==============================
+def save_report(market_snapshot: str, summary: str):
+    """日次レポートを reports/YYYY-MM-DD.json として保存"""
+    jst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+    dstr = jst.strftime("%Y-%m-%d")
+
+    # github_actions_test/reports/ 配下に保存
+    out_dir = Path(__file__).parent / "reports"
+    out_dir.mkdir(exist_ok=True)
+
+    data = {
+        "date_jst": dstr,
+        "created_at": jst.isoformat(),
+        "snapshot": market_snapshot,
+        "summary": summary,
+        "pages_url": PAGES_URL,
+    }
+    out_path = out_dir / f"{dstr}.json"
+    out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    print("saved report json:", out_path)
+
+# ==============================
 # GPT サマリー
 # ==============================
 def build_summary(market_snapshot: str) -> str:
@@ -250,6 +274,10 @@ def main():
     print("=== Generated summary ===")
     print(summary)
 
+    # ここで JSON 保存（RAG 用の元データ）
+    save_report(snapshot, summary)
+
+    # Slack 投稿
     message = (
         f"【インタラクティブチャート（GitHub Pages）】\n{PAGES_URL}\n\n"
         f"{snapshot}\n\n{summary}"

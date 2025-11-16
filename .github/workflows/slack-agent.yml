@@ -190,3 +190,24 @@ jobs:
       - name: Run Slack agent
         run: |
           python slack_agent.py
+
+      - name: Commit and push daily report JSON
+        run: |
+          # Git のユーザー情報を設定
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # reports 以下の JSON をステージング
+          if ls reports/*.json 1> /dev/null 2>&1; then
+            git add reports/*.json
+          else
+            echo "no reports to add"
+          fi
+
+          # 変更があるときだけコミット & プッシュ
+          if ! git diff --cached --quiet; then
+            git commit -m "Add daily market report $(date -u +'%Y-%m-%d')"
+            git push
+          else
+            echo "no changes to commit"
+          fi
