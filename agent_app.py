@@ -13,6 +13,7 @@ from slack_bolt.adapter.fastapi import SlackRequestHandler
 
 from pathlib import Path
 from dotenv import load_dotenv
+import json  # ← 追加: /history 用に JSON を読む
 
 env_path = Path(__file__).with_name(".env")
 if env_path.exists():
@@ -113,7 +114,86 @@ def llm_answer(query: str, context: str = "") -> str:
     )
     return res.choices[0].message.content.strip()
 
+# ===== /history 用：過去レポート読み込み & 検索 =====
+
+def load_history_reports():
+    """
+    slack_agent.py が保存した reports/*.json を全部読む。
+    戻り値: List[dict] （date_jst, snapshot, summary, ...）
+    """
+    reports_dir = Path(__file__).parent / "reports"
+    if not reports_dir.exists():
+        print("[history] reports ディレクトリがありません:", reports_dir)
+        return []
+
+    reports = []
+    for p in sorted(reports_dir.glob("*.json")):
+        try:
+            j = json.loads(p.read_text(encoding="utf-8"))
+            # date_jst が無い場合に備えてファイル名も持っておく
+            j["_filename"] = p.name
+            reports.append(j)
+        except Exception as e:
+            print(f"[history] {p} の読み込みでエラー:", e)
+    return reports
+
+def search_history_reports(query: str, limit: int = 5):
+    """
+    簡易版: テキストに query が含まれているレポートを後ろから最大 limit 件取る。
+    query が空なら、単に最近のレポートを limit 件返す。
+    """
+    all_reports = load_history_reports()
+    if not all_reports:
+        return []
+
+    if not query.strip():
+        # そのまま末尾から limit 件（新しいもの想定）
+        return all_reports[-limit:]
+
+    q = query.strip()
+    hits = []
+    for r in all_reports:
+        text = (r.get("summary") or "") + "\n" + (r.get("snapshot") or "")
+        if q in text:
+            hits.append(r)
+
+    if not hits:
+        return []
+
+    # 新しい方から limit 件
+    return hits[-limit:]
+
+def llm_history_answer(question: str, history_context: str) -> str:
+    """
+    /history 用の回答生成。
+    history_context には過去レポートの要約＋日付が入っている前提。
+    """
+    prompt = f"""あなたは日本のマーケットアシスタントです。
+ユーザーから、過去のマーケットレポートにもとづく質問が来ています。
+
+ユーザーの質問:
+{question}
+
+以下は、過去数日分のマーケットレポート（スナップショット＋サマリー）です：
+{history_context}
+
+指示:
+- 過去レポートに書かれている範囲でだけ答えてください。
+- レポートに無いことは推測せず、「レポートからは分かりません」と正直に言ってください。
+- 日付（いつ頃）と内容の対応がわかるように説明してください。
+- 先頭に結論、そのあとに箇条書きで整理してください。
+- 最後に必ず次の一文を付けてください：
+  「※この回答は過去の自動生成レポートを元にした参考情報であり、正確性・完全性・将来の成果を保証するものではありません。」
+"""
+    res = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+    )
+    return res.choices[0].message.content.strip()
+
 # ===== Slack ハンドラ（共通）=====
+
 @slack_app.command("/market")
 def cmd_market(ack, body, respond):
     ack()
@@ -138,6 +218,38 @@ def cmd_market(ack, body, respond):
         ctx = "\n".join(ctx_lines) + f"\n総合チャート: {pages_index()} / 個別一覧: {pages_list()}"
 
     respond(llm_answer(text, ctx))
+
+# ==== /history コマンド ====
+
+@slack_app.command("/history")
+def cmd_history(ack, body, respond):
+    """
+    例: /history 最近の半導体関連銘柄の動きを教えて
+         /history ここ1週間で地合いが悪かった日は？
+    """
+    ack()
+    text = (body.get("text") or "").strip()
+
+    if not text:
+        respond("使い方例:\n• `/history 最近の半導体テーマの動きは？`\n• `/history ここ1週間で地合いが悪かった日は？`")
+        return
+
+    reports = search_history_reports(text, limit=5)
+    if not reports:
+        respond("過去レポート（reports/*.json）から該当するものが見つかりませんでした。`slack_agent.py` が JSON を保存しているか、GitHub から最新を pull できているか確認してください。")
+        return
+
+    # LLM に渡すコンテキストを組み立てる
+    ctx_lines = []
+    for r in reports:
+        date_str = r.get("date_jst") or r.get("_filename", "unknown")
+        summary  = r.get("summary")  or ""
+        snapshot = r.get("snapshot") or ""
+        ctx_lines.append(f"【{date_str} のレポート】\nサマリー:\n{summary}\n\nスナップショット:\n{snapshot}\n")
+
+    history_ctx = "\n\n".join(ctx_lines)
+    answer = llm_history_answer(text, history_ctx)
+    respond(answer)
 
 @slack_app.event("app_mention")
 def on_mention(event, say):
