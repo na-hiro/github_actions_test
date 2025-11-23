@@ -13,7 +13,14 @@ from slack_bolt.adapter.fastapi import SlackRequestHandler
 
 from pathlib import Path
 from dotenv import load_dotenv
-import json  # ← 追加: /history 用に JSON を読む
+import json
+from math import sqrt  # 埋め込みのコサイン類似度計算で使用
+
+# agent_app.py の冒頭付近
+#from github_actions_test.sarima_tool import ConstructionAndEvaluationSarima
+from sarima_tool import ConstructionAndEvaluationSarima
+from slack_sdk.errors import SlackApiError  # 念のため
+import io
 
 env_path = Path(__file__).with_name(".env")
 if env_path.exists():
@@ -32,10 +39,54 @@ client    = OpenAI(api_key=OPENAI_API_KEY)
 slack_app = SlackApp(token=SLACK_BOT_TOKEN, signing_secret=SLACK_SIGNING_SECRET)
 slack_web = WebClient(token=SLACK_BOT_TOKEN)
 
+# 過去レポートのベクトルインデックス（最初の /history 呼び出し時に構築）
+HISTORY_INDEX = None  # list[{"report": dict, "embedding": list[float]}] を格納予定
+
 # ===== 参照シンボル（必要なら tickers.csv 連携に差し替え可）=====
 INDEX_SYMBOLS = {"^NKX": "日経平均", "^TPX": "TOPIX"}
 STOCK_SYMBOLS = {"7203.JP": "トヨタ自動車", "6758.JP": "ソニーG", "9984.JP": "ソフトバンクG"}
 GOLD_SYMBOLS  = {"XAUUSD": "金(USD)", "XAUJPY": "金(JPY)"}
+
+
+@slack_app.command("/forecast")
+def cmd_forecast(ack, body, respond):
+    ack()
+    text = (body.get("text") or "").strip()
+    if not text or not text.isdigit():
+        respond("使い方: `/forecast 7203` のように、4桁の証券コードを指定してください。")
+        return
+
+    code = text  # 例: "7203"
+
+    try:
+        tool = ConstructionAndEvaluationSarima(flg_web=True)
+        fig, rmse, mae, mape = tool.main(ticker=code)
+
+        import io
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        buf.seek(0)
+
+        channel_id = body["channel_id"]
+
+        # ✅ 新しい API: files_upload_v2 を使う
+        slack_web.files_upload_v2(
+            channel=channel_id,              # channels ではなく channel
+            file=buf,
+            filename=f"forecast_{code}.png",
+            title=f"{code} のSARIMA予測",
+            initial_comment=(
+                f"{code} の SARIMA 予測チャートです。\n"
+                f"RMSE={rmse:.2f}, MAE={mae:.2f}, MAPE={mape:.2%}"
+            ),
+        )
+
+    except SlackApiError as e:
+        # Slack API エラー用
+        respond(f"Slack へのファイルアップロードでエラーが発生しました: {e.response.get('error')}")
+    except Exception as e:
+        # それ以外（データ取得やモデル学習など）のエラー
+        respond(f"予測処理でエラーが発生しました: {e}")
 
 def fetch_from_stooq(symbol: str):
     url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
@@ -114,7 +165,7 @@ def llm_answer(query: str, context: str = "") -> str:
     )
     return res.choices[0].message.content.strip()
 
-# ===== /history 用：過去レポート読み込み & 検索 =====
+# ===== /history 用：過去レポート読み込み =====
 
 def load_history_reports():
     """
@@ -137,31 +188,84 @@ def load_history_reports():
             print(f"[history] {p} の読み込みでエラー:", e)
     return reports
 
-def search_history_reports(query: str, limit: int = 5):
-    """
-    簡易版: テキストに query が含まれているレポートを後ろから最大 limit 件取る。
-    query が空なら、単に最近のレポートを limit 件返す。
-    """
-    all_reports = load_history_reports()
-    if not all_reports:
-        return []
+# ===== 埋め込み＋ベクトル検索まわり =====
 
-    if not query.strip():
-        # そのまま末尾から limit 件（新しいもの想定）
-        return all_reports[-limit:]
+def get_embedding(text: str):
+    """OpenAI の埋め込みを 1 本返す"""
+    res = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=text,
+    )
+    return res.data[0].embedding
 
-    q = query.strip()
-    hits = []
-    for r in all_reports:
+def cosine_similarity(a, b) -> float:
+    """2つのベクトルのコサイン類似度を返す（-1〜1）"""
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na  += x * x
+        nb  += y * y
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (sqrt(na) * sqrt(nb))
+
+def build_history_index():
+    """
+    reports/*.json からインメモリのベクトルインデックスを構築。
+    HISTORY_INDEX に list[{"report": dict, "embedding": list[float]}] を詰める。
+    """
+    global HISTORY_INDEX
+    reports = load_history_reports()
+    index = []
+
+    for r in reports:
         text = (r.get("summary") or "") + "\n" + (r.get("snapshot") or "")
-        if q in text:
-            hits.append(r)
+        if not text.strip():
+            continue
+        try:
+            emb = get_embedding(text)
+            index.append({"report": r, "embedding": emb})
+        except Exception as e:
+            print("[history] embedding 取得に失敗:", e)
 
-    if not hits:
-        return []
+    HISTORY_INDEX = index
+    print(f"[history] ベクトルインデックス構築完了: {len(index)} 件")
 
-    # 新しい方から limit 件
-    return hits[-limit:]
+def search_history_by_embedding(question: str, top_k: int = 5):
+    """
+    質問文の埋め込みと過去レポートの埋め込みのコサイン類似度で上位 top_k を返す。
+    戻り値: (List[report_dict], max_similarity)
+    """
+    global HISTORY_INDEX
+    if HISTORY_INDEX is None:
+        build_history_index()
+
+    if not HISTORY_INDEX:
+        return [], 0.0
+
+    try:
+        q_emb = get_embedding(question)
+    except Exception as e:
+        print("[history] 質問の embedding 取得に失敗:", e)
+        return [], 0.0
+
+    scored = []
+    for item in HISTORY_INDEX:
+        sim = cosine_similarity(q_emb, item["embedding"])
+        scored.append((sim, item["report"]))
+
+    if not scored:
+        return [], 0.0
+
+    # 類似度の高い順にソート
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    max_sim = scored[0][0]
+    # 類似度 0 以下はノイズなので除外
+    results = [r for sim, r in scored[:top_k] if sim > 0.0]
+    return results, max_sim
 
 def llm_history_answer(question: str, history_context: str) -> str:
     """
@@ -199,7 +303,13 @@ def cmd_market(ack, body, respond):
     ack()
     text = (body.get("text") or "").strip()
     if not text:
-        respond(f"使い方例:\n• `/market 7203.JP`\n• `/market NKX`\n• `/market 今朝の要点`\n個別一覧: {pages_list()}")
+        respond(
+            f"使い方例:\n"
+            f"• `/market 7203.JP`\n"
+            f"• `/market NKX`\n"
+            f"• `/market 今朝の要点`\n"
+            f"個別一覧: {pages_list()}"
+        )
         return
 
     import re
@@ -208,7 +318,10 @@ def cmd_market(ack, body, respond):
     for s in set(syms):
         q = fetch_from_stooq(s)
         if q:
-            ctx_lines.append(f"{s}: {q['price']:.2f} ({q['change']:+.2f}, {q['change_pct']:+.2f}%), date={q['date']}\nチャート: {chart_url(s)}")
+            ctx_lines.append(
+                f"{s}: {q['price']:.2f} ({q['change']:+.2f}, {q['change_pct']:+.2f}%), "
+                f"date={q['date']}\nチャート: {chart_url(s)}"
+            )
         else:
             ctx_lines.append(f"{s}: 取得失敗")
 
@@ -219,7 +332,7 @@ def cmd_market(ack, body, respond):
 
     respond(llm_answer(text, ctx))
 
-# ==== /history コマンド ====
+# ==== /history コマンド（埋め込み＋ベクトル検索版）====
 
 @slack_app.command("/history")
 def cmd_history(ack, body, respond):
@@ -231,12 +344,25 @@ def cmd_history(ack, body, respond):
     text = (body.get("text") or "").strip()
 
     if not text:
-        respond("使い方例:\n• `/history 最近の半導体テーマの動きは？`\n• `/history ここ1週間で地合いが悪かった日は？`")
+        respond(
+            "使い方例:\n"
+            "• `/history 最近の半導体テーマの動きは？`\n"
+            "• `/history ここ1週間で地合いが悪かった日は？`\n\n"
+            "※過去レポートに無い最新の状況を知りたい場合は `/market` を使ってください。"
+        )
         return
 
-    reports = search_history_reports(text, limit=5)
-    if not reports:
-        respond("過去レポート（reports/*.json）から該当するものが見つかりませんでした。`slack_agent.py` が JSON を保存しているか、GitHub から最新を pull できているか確認してください。")
+    # ベクトル検索で過去レポートを取得
+    reports, max_sim = search_history_by_embedding(text, top_k=5)
+    THRESHOLD = 0.50  # 類似度しきい値（調整可）
+
+    if not reports or max_sim < THRESHOLD:
+        respond(
+            "過去のマーケットレポートから、この質問に直接関連する内容を見つけることができませんでした。\n"
+            "（これまでのレポートには、今回のテーマに近い記述がほとんど無いようです。）\n\n"
+            "■ 過去の傾向 → `/history テーマ名` などで改めて聞いてみてください。\n"
+            "■ 最新の状況 → `/market 7203.JP` や `/market 今朝の要点` で、現在の市況を確認できます。"
+        )
         return
 
     # LLM に渡すコンテキストを組み立てる
@@ -245,7 +371,11 @@ def cmd_history(ack, body, respond):
         date_str = r.get("date_jst") or r.get("_filename", "unknown")
         summary  = r.get("summary")  or ""
         snapshot = r.get("snapshot") or ""
-        ctx_lines.append(f"【{date_str} のレポート】\nサマリー:\n{summary}\n\nスナップショット:\n{snapshot}\n")
+        ctx_lines.append(
+            f"【{date_str} のレポート】\n"
+            f"サマリー:\n{summary}\n\n"
+            f"スナップショット:\n{snapshot}\n"
+        )
 
     history_ctx = "\n\n".join(ctx_lines)
     answer = llm_history_answer(text, history_ctx)
