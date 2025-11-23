@@ -166,10 +166,117 @@ def build_gold_section() -> str:
             lines.append(f"- {label}: データ取得失敗")
     return "\n".join(lines)
 
+def build_volatility_analysis() -> str:
+    """ボラティリティ分析: 変動率の統計"""
+    changes = []
+    for symbol in STOCK_SYMBOLS.keys():
+        q = fetch_from_stooq(symbol)
+        if q:
+            changes.append(abs(q["change_pct"]))
+    
+    if not changes:
+        return "■ ボラティリティ分析: データ不足"
+    
+    import statistics
+    avg_vol = statistics.mean(changes)
+    max_vol = max(changes)
+    min_vol = min(changes)
+    
+    vol_level = "高" if avg_vol > 2.0 else "中" if avg_vol > 1.0 else "低"
+    
+    return "\n".join([
+        "■ ボラティリティ分析（指定銘柄）",
+        f"- 平均変動率: {avg_vol:.2f}% （市場の動き: {vol_level}）",
+        f"- 最大変動: {max_vol:.2f}%",
+        f"- 最小変動: {min_vol:.2f}%"
+    ])
+
+def build_sector_analysis() -> str:
+    """セクター別動向: 業種分類による集計"""
+    sectors = {
+        "自動車": ["7203.JP", "7267.JP"],  # トヨタ、ホンダ
+        "テクノロジー": ["6758.JP", "8035.JP", "6861.JP"],  # ソニー、東エレク、キーエンス
+        "通信": ["9984.JP"],  # ソフトバンクG
+        "ゲーム": ["7974.JP"],  # 任天堂
+        "金融": ["8306.JP", "8316.JP"]  # 三菱UFJ、三井住友
+    }
+    
+    sector_perf = {}
+    for sector, symbols in sectors.items():
+        changes = []
+        for symbol in symbols:
+            if symbol in STOCK_SYMBOLS:
+                q = fetch_from_stooq(symbol)
+                if q:
+                    changes.append(q["change_pct"])
+        if changes:
+            import statistics
+            sector_perf[sector] = statistics.mean(changes)
+    
+    if not sector_perf:
+        return "■ セクター別動向: データ不足"
+    
+    sorted_sectors = sorted(sector_perf.items(), key=lambda x: x[1], reverse=True)
+    lines = ["■ セクター別動向（平均変動率）"]
+    for sector, avg_chg in sorted_sectors:
+        sign = "+" if avg_chg >= 0 else ""
+        lines.append(f"- {sector}: {sign}{avg_chg:.2f}%")
+    
+    return "\n".join(lines)
+
+def build_market_sentiment() -> str:
+    """市場センチメント: 強気/弱気の割合と勢い"""
+    bullish = 0  # 上昇 > +1%
+    neutral = 0  # -1% 〜 +1%
+    bearish = 0  # 下落 < -1%
+    
+    strong_moves = []  # 大きな動き (|変動| > 3%)
+    
+    for symbol, name in STOCK_SYMBOLS.items():
+        q = fetch_from_stooq(symbol)
+        if q:
+            pct = q["change_pct"]
+            if pct > 1.0:
+                bullish += 1
+            elif pct < -1.0:
+                bearish += 1
+            else:
+                neutral += 1
+            
+            if abs(pct) > 3.0:
+                strong_moves.append(f"{name} ({'+' if pct>=0 else ''}{pct:.2f}%)")
+    
+    total = bullish + neutral + bearish
+    if total == 0:
+        return "■ 市場センチメント: データ不足"
+    
+    sentiment = "強気優勢" if bullish > bearish * 1.5 else "弱気優勢" if bearish > bullish * 1.5 else "中立"
+    
+    lines = [
+        "■ 市場センチメント",
+        f"- 強気（+1%超）: {bullish}銘柄",
+        f"- 中立（±1%）: {neutral}銘柄",
+        f"- 弱気（-1%超）: {bearish}銘柄",
+        f"- 総合判定: {sentiment}"
+    ]
+    
+    if strong_moves:
+        lines.append(f"- 大きな動き（±3%超）: {', '.join(strong_moves[:3])}")
+    
+    return "\n".join(lines)
+
 def build_market_snapshot_text() -> str:
     jst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
     header = f"日本株マーケットスナップショット (JST {jst:%Y-%m-%d %H:%M:%S})"
-    parts = [header, "■ 主要指数", build_index_section(), build_stock_rankings()]
+    parts = [
+        header, 
+        "■ 主要指数", 
+        build_index_section(), 
+        build_stock_rankings(),
+        build_volatility_analysis(),
+        build_sector_analysis(),
+        build_market_sentiment()
+    ]
     gold = build_gold_section()
     if gold:
         parts.append(gold)
